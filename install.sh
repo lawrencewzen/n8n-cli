@@ -36,12 +36,12 @@ ln -sf "${INSTALL_DIR}/n8n-cli.mjs" "${BIN_LINK}"
 echo "✓ n8n-cli → ${BIN_LINK}"
 
 # Download skill
-curl -fsSL "${RAW}/skills/n8n.md" -o "${INSTALL_DIR}/n8n.md"
-echo "✓ skill downloaded to ${INSTALL_DIR}/n8n.md"
+mkdir -p "${INSTALL_DIR}/skills/n8n"
+curl -fsSL "${RAW}/skills/n8n/SKILL.md" -o "${INSTALL_DIR}/skills/n8n/SKILL.md"
+echo "✓ skill downloaded to ${INSTALL_DIR}/skills/n8n/SKILL.md"
 
 # Symlink skill to Alice skills dir (if specified or auto-detected)
 if [[ -z "${SKILLS_DIR}" ]]; then
-  # Auto-detect Alice skills dir
   for candidate in /opt/alice/data/skills "${HOME}/.alice/skills"; do
     if [[ -d "$candidate" ]]; then
       SKILLS_DIR="$candidate"
@@ -52,11 +52,11 @@ fi
 
 if [[ -n "${SKILLS_DIR}" ]]; then
   mkdir -p "${SKILLS_DIR}"
-  ln -sf "${INSTALL_DIR}/n8n.md" "${SKILLS_DIR}/n8n.md"
-  echo "✓ skill symlinked → ${SKILLS_DIR}/n8n.md"
+  ln -sf "${INSTALL_DIR}/skills/n8n" "${SKILLS_DIR}/n8n"
+  echo "✓ skill symlinked → ${SKILLS_DIR}/n8n"
 else
   echo "  (no skills dir found, skipping skill symlink)"
-  echo "  To install skill later: ln -sf ${INSTALL_DIR}/n8n.md <skills-dir>/n8n.md"
+  echo "  To install skill later: ln -sf ${INSTALL_DIR}/skills/n8n <skills-dir>/n8n"
 fi
 
 echo ""

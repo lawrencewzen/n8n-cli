@@ -12,7 +12,7 @@ update-cli:
 
 # Update only the skill markdown
 update-skill:
-	ssh $(VPS) "curl -fsSL https://raw.githubusercontent.com/lawrencewzen/n8n-cli/main/skills/n8n.md -o /opt/n8n-cli/n8n.md"
+	ssh $(VPS) "mkdir -p /opt/n8n-cli/skills/n8n && curl -fsSL https://raw.githubusercontent.com/lawrencewzen/n8n-cli/main/skills/n8n/SKILL.md -o /opt/n8n-cli/skills/n8n/SKILL.md"
 	@echo "✓ skill updated"
 
 test:

@@ -1,28 +1,21 @@
-VPS := dmit-new
-REMOTE_BIN := /opt/alice/tools/n8n-cli.mjs
-SYMLINK := /usr/local/bin/n8n-cli
-SKILL_DIR := /opt/alice/data/skills
+VPS        := dmit-new
+SKILLS_DIR := /opt/alice/data/skills
 
-deploy:
-	ssh $(VPS) "mkdir -p /opt/alice/tools $(SKILL_DIR)"
-	scp bin/n8n-cli.mjs $(VPS):$(REMOTE_BIN)
-	ssh $(VPS) "chmod +x $(REMOTE_BIN) && ln -sf $(REMOTE_BIN) $(SYMLINK)"
-	scp skills/n8n.md $(VPS):$(SKILL_DIR)/n8n.md
-	@echo "✓ deployed n8n-cli + skill"
+# Install / update on VPS via install.sh from GitHub
+install:
+	ssh $(VPS) "curl -fsSL https://raw.githubusercontent.com/lawrencewzen/n8n-cli/main/install.sh | bash -s -- --skills-dir $(SKILLS_DIR)"
 
-deploy-cli:
-	ssh $(VPS) "mkdir -p /opt/alice/tools"
-	scp bin/n8n-cli.mjs $(VPS):$(REMOTE_BIN)
-	ssh $(VPS) "chmod +x $(REMOTE_BIN) && ln -sf $(REMOTE_BIN) $(SYMLINK)"
-	@echo "✓ deployed n8n-cli"
+# Update only the CLI binary (fast path)
+update-cli:
+	ssh $(VPS) "curl -fsSL https://raw.githubusercontent.com/lawrencewzen/n8n-cli/main/bin/n8n-cli.mjs -o /opt/n8n-cli/n8n-cli.mjs"
+	@echo "✓ CLI updated"
 
-deploy-skill:
-	ssh $(VPS) "mkdir -p $(SKILL_DIR)"
-	scp skills/n8n.md $(VPS):$(SKILL_DIR)/n8n.md
-	@echo "✓ deployed skill"
+# Update only the skill markdown
+update-skill:
+	ssh $(VPS) "curl -fsSL https://raw.githubusercontent.com/lawrencewzen/n8n-cli/main/skills/n8n.md -o /opt/n8n-cli/n8n.md"
+	@echo "✓ skill updated"
 
 test:
-	n8n-cli health
-	n8n-cli list-workflows
+	ssh $(VPS) "n8n-cli health && n8n-cli list-workflows"
 
-.PHONY: deploy deploy-cli deploy-skill test
+.PHONY: install update-cli update-skill test

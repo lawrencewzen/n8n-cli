@@ -40,8 +40,10 @@ async function req(cfg, method, path, body) {
   try { data = JSON.parse(text); } catch { data = text; }
 
   if (!res.ok) {
-    const msg = data?.message || data?.error || text;
-    throw new Error(`HTTP ${res.status}: ${msg}`);
+    const parts = [data?.message || data?.error || text];
+    if (data?.description) parts.push(data.description);
+    if (data?.hint) parts.push(`Hint: ${data.hint}`);
+    throw new Error(`HTTP ${res.status}: ${parts.join(" | ")}`);
   }
   return data;
 }

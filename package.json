@@ -1,0 +1,12 @@
+{
+  "name": "n8n-cli",
+  "version": "1.0.0",
+  "description": "Lightweight CLI wrapper for n8n REST API",
+  "type": "module",
+  "bin": {
+    "n8n-cli": "./bin/n8n-cli.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

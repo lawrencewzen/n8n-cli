@@ -705,3 +705,331 @@ n8n-cli get-execution <execution-id>  # 查看详细输出和错误
 | IF 单目运算符报错 | isEmpty/isNotEmpty 不需要 value2 |
 | Postgres SQL 注入风险 | 改为 `$1,$2` 参数化查询 |
 | Schedule 时间不对 | 设置 `timezone: "Asia/Shanghai"` |
+| SplitInBatches 循环后数据丢失 | 用 `$getWorkflowStaticData` 跨迭代累积 |
+| Code 节点引用其他节点报错 | 改 `$('Node').json` → `$('Node').first().json` |
+| 下游 Set 节点 paired_item_no_info | Code 返回新 item 时加 `pairedItem: { item: i }` |
+| 价格比较出现误差 | 用 `Math.round(price * 100)` 比较整分数 |
+
+---
+
+## 十一、Code 节点生产级陷阱
+
+### SplitInBatches 输出口语义（反直觉！）
+
+- `main[0]` = **done** — 所有批次处理完后触发一次
+- `main[1]` = **每批数据** — 每批触发一次（这才是循环体）
+
+done 输出口下游建议加一个 **Limit 1** 节点，防止边界情况重复处理。
+
+### 跨迭代数据累积（CRITICAL）
+
+`$('循环体内节点').all()` 在循环结束后**只返回最后一次迭代的数据**，之前批次的数据会静默丢失。
+
+**修复方案**：用 workflow 静态数据累积：
+
+```javascript
+// 循环开始前（重置累积器）：
+const staticData = $getWorkflowStaticData('global');
+staticData.results = [];
+return $input.all();
+
+// 循环体内（每批累积）：
+const staticData = $getWorkflowStaticData('global');
+const batchResults = [];
+for (const item of $input.all()) {
+  const processed = { /* ... */ };
+  batchResults.push({ json: processed });
+  staticData.results.push(processed);
+}
+return batchResults;
+
+// 循环结束后（读取全部数据）：
+const staticData = $getWorkflowStaticData('global');
+const allResults = staticData.results || [];
+```
+
+### pairedItem — 创建新 item 时必须带
+
+Code 节点输出的新 item 若不携带 `pairedItem`，下游 Set 节点会报 `paired_item_no_info`：
+
+```javascript
+const results = [];
+for (let i = 0; i < $input.all().length; i++) {
+  results.push({
+    json: { /* 新数据 */ },
+    pairedItem: { item: i }  // 必须
+  });
+}
+return results;
+```
+
+### 正确的节点引用语法
+
+```javascript
+// ❌ 错误 - 直接访问 .json
+const data = $('HTTP Request').json;
+
+// ✅ 正确 - 先调 .first() 再访问
+const data = $('HTTP Request').first().json;
+
+// ✅ 获取所有 items
+const allData = $('HTTP Request').all();
+```
+
+### 浮点数精度（价格/货币比较）
+
+```javascript
+// ❌ 不可靠 - 浮点噪声导致误触发
+if (newPrice !== oldPrice) { /* ... */ }
+
+// ✅ 可靠 - 转换为整分数再比较
+if (Math.round(newPrice * 100) !== Math.round(oldPrice * 100)) {
+  // 真实价格变化
+}
+```
+
+---
+
+## 十二、验证系统
+
+### 验证配置文件（Profiles）
+
+| Profile | 适用场景 | 特点 |
+|---|---|---|
+| `minimal` | 编辑中快速检查 | 只检查必填字段，最宽松 |
+| `runtime` | **推荐**，部署前验证 | 检查必填、类型、允许值 |
+| `ai-friendly` | AI 生成的配置 | 减少误报，更宽容 |
+| `strict` | 生产环境 | 最严格，含最佳实践检查 |
+
+```javascript
+// 推荐方式
+validate_node({nodeType: "nodes-base.slack", config: {...}, profile: "runtime"})
+```
+
+### 验证循环（正常现象！）
+
+验证通常需要 2-3 轮：
+
+```
+配置节点 → validate_node → 读错误信息 → 修复 → validate_node → 直到通过
+```
+
+平均：思考错误 23s，修复 58s。不要期望一次通过。
+
+### 错误类型
+
+| 类型 | 含义 | 修复 |
+|---|---|---|
+| `missing_required` | 缺少必填字段 | 补充该字段 |
+| `invalid_value` | 值不在允许选项内 | 查错误信息中的允许值 |
+| `type_mismatch` | 类型错误（如字符串传了数字） | 转换正确类型 |
+| `invalid_expression` | 表达式语法错误 | 加 `={{...}}` 或检查引用 |
+| `invalid_reference` | 引用的节点不存在 | 检查节点名拼写 |
+
+### patchNodeField 特定错误
+
+`patchNodeField` 严格匹配，失败会报错而非静默跳过：
+
+```
+patchNodeField: find string not found in field "parameters.jsCode"
+→ 检查 find 字符串是否完全匹配（空白、换行都计）
+→ 先用 n8n_get_workflow 确认当前字段内容
+
+patchNodeField: find string matches 3 times — set replaceAll: true
+→ find 字符串出现多次，设 replaceAll: true 或用更具体的字符串
+
+patchNodeField: invalid or unsafe regex pattern
+→ 检查正则，避免嵌套量词 (a+)+ 等 ReDoS 风险
+```
+
+### 自动净化（Auto-Sanitization）
+
+任何工作流更新都会自动修复操作符结构：
+
+- **二元操作符**（equals/contains 等）→ 自动删除 `singleValue`
+- **一元操作符**（isEmpty/isNotEmpty 等）→ 自动添加 `singleValue: true`
+- **IF/Switch 元数据** → 自动添加 `conditions.options`
+
+**不能自动修复**：
+- 断开的连接 → 用 `cleanStaleConnections` 操作
+- 分支数量不匹配 → 手动添加缺失连接
+- 悖论式损坏状态 → 可能需要手动干预
+
+### 自动修复（n8n_autofix_workflow）
+
+```javascript
+// 预览修复（不应用）
+n8n_autofix_workflow({id: "workflow-id"})
+
+// 应用高置信度修复
+n8n_autofix_workflow({
+  id: "workflow-id",
+  applyFixes: true,
+  confidenceThreshold: "high"
+})
+```
+
+可修复的问题类型：`expression-format`（缺少 `=` 前缀）、`typeversion-correction`、`error-output-config`、`node-type-correction`、`webhook-missing-path`、`typeversion-upgrade`、`version-migration`。
+
+### 恢复策略
+
+| 情况 | 策略 |
+|---|---|
+| 配置严重损坏 | 从最小配置重建，逐步添加功能 |
+| 执行有误但验证通过 | 二分法：移除一半节点定位问题 |
+| "节点不存在"错误 | `cleanStaleConnections` 操作 |
+| 有自动可修复的错误 | 用 `n8n_autofix_workflow` |
+
+---
+
+## 十三、MCP Tools 使用（n8n-mcp）
+
+使用 n8n-mcp MCP 服务操作工作流时，以下知识点至关重要。
+
+### nodeType 格式——两套系统！
+
+**搜索/验证工具**用短前缀：
+```javascript
+"nodes-base.slack"
+"nodes-base.httpRequest"
+"nodes-langchain.agent"
+```
+适用：`search_nodes`、`get_node`、`validate_node`、`validate_workflow`
+
+**工作流工具**用完整前缀：
+```javascript
+"n8n-nodes-base.slack"
+"n8n-nodes-base.httpRequest"
+"@n8n/n8n-nodes-langchain.agent"
+```
+适用：`n8n_create_workflow`、`n8n_update_partial_workflow`
+
+`search_nodes` 返回结果包含两种格式：
+```javascript
+{
+  "nodeType": "nodes-base.slack",           // 搜索/验证用
+  "workflowNodeType": "n8n-nodes-base.slack" // 工作流用
+}
+```
+
+### 常见错误速查
+
+| 错误 | 原因 | 修复 |
+|---|---|---|
+| `get_node` 报 "Node not found" | 用了错误前缀 | 改 `n8n-nodes-base.slack` → `nodes-base.slack` |
+| `get_node` 响应太大 | 用了 `detail: "full"` | 默认 `standard`，95% 场景够用 |
+| `updateNode` 不生效 | 用了 `parameters` 而非 `updates` | 改为 `updates: {url: "..."}` |
+| 凭证挂载失败 | 格式错误 | 用 `credentials: {httpHeaderAuth: {id: "x", name: "y"}}` |
+| 验证误报太多 | 未指定 Profile | 加 `profile: "runtime"` |
+| IF 连接方向混乱 | 手算 sourceIndex | 改用 `branch: "true"` / `branch: "false"` |
+
+### get_node Detail Levels 决策树
+
+```
+新配置节点？ → get_node()（默认 standard，~1-2K token）
+          ↓
+标准详情够用？ → 直接配置
+          ↓ 不够
+查找特定字段？ → get_node({mode: "search_properties", propertyQuery: "auth"})
+          ↓ 还不够
+复杂调试？   → get_node({detail: "full"})（~3-8K token，慎用）
+```
+
+### patchNodeField 精确编辑
+
+修改 Code 节点内容时，无需替换整个字段：
+
+```javascript
+n8n_update_partial_workflow({
+  id: "wf-123",
+  operations: [{
+    type: "patchNodeField",
+    nodeName: "Code",
+    fieldPath: "parameters.jsCode",
+    patches: [{find: "const limit = 10;", replace: "const limit = 50;"}]
+  }]
+})
+```
+
+同样适用于长 HTML 模板、大 JSON body 中的局部修改。
+
+### 数据表管理（n8n_manage_datatable）
+
+```javascript
+// 创建表
+n8n_manage_datatable({
+  action: "createTable",
+  name: "Contacts",
+  columns: [{name: "email", type: "string"}, {name: "score", type: "number"}]
+})
+
+// 查询（带过滤）
+n8n_manage_datatable({
+  action: "getRows",
+  tableId: "dt-123",
+  filter: {filters: [{columnName: "status", condition: "eq", value: "active"}]},
+  limit: 50
+})
+
+// 批量更新前先 dry run
+n8n_manage_datatable({
+  action: "updateRows",
+  tableId: "dt-123",
+  filter: {filters: [{columnName: "score", condition: "lt", value: 5}]},
+  data: {status: "inactive"},
+  dryRun: true  // 确认影响范围
+})
+```
+
+过滤条件：`eq` / `neq` / `like` / `ilike` / `gt` / `gte` / `lt` / `lte`
+
+### 凭证管理（n8n_manage_credentials）
+
+```javascript
+// 先查 schema，再创建
+n8n_manage_credentials({action: "getSchema", credentialType: "httpHeaderAuth"})
+
+n8n_manage_credentials({
+  action: "create",
+  name: "My Slack Token",
+  type: "slackApi",
+  data: {accessToken: "xoxb-..."}
+})
+
+// 挂载到节点时的正确格式
+updates: {
+  credentials: {
+    slackApi: {id: "abc123", name: "My Slack Token"}
+  }
+}
+```
+
+`get`/`create`/`update` 响应会过滤掉 `data` 字段（安全防护），凭证值不会在响应中暴露。
+
+### 安全审计（n8n_audit_instance）
+
+```javascript
+// 完整审计（内置 + 自定义扫描）
+n8n_audit_instance()
+
+// 只扫描特定问题
+n8n_audit_instance({
+  customChecks: ["hardcoded_secrets", "unauthenticated_webhooks"]
+})
+```
+
+内置审计分类：`credentials` / `database` / `nodes` / `instance` / `filesystem`
+
+自定义扫描检查：
+- `hardcoded_secrets` — 检测 50+ 种 API key/token 模式及 PII（邮件、手机、信用卡）
+- `unauthenticated_webhooks` — 标记无认证的 webhook 触发器
+- `error_handling` — 标记 3+ 节点但无错误处理的工作流
+- `data_retention` — 标记保存全部执行数据的工作流
+
+输出包含：问题摘要表、按工作流分组的发现、修复 Playbook（可自动修复 / 需人工审查 / 需手动操作三类）。
+
+### 节点配置注意事项
+
+**Google Sheets**：每条输入 item 触发一次 API 调用。100 条 item 的 Append Row = 100 次 API 调用。批量写入应先在 Code 节点聚合，再用 HTTP Request 调 Sheets API。永远不要对含公式的列用 `append`，会覆盖公式。
+
+**Property Dependencies**：字段是否显示取决于其他字段的值（displayOptions 机制）。当验证报错但不理解原因时，用 `get_node({mode: "search_properties", propertyQuery: "field-name"})` 查看显示条件。
